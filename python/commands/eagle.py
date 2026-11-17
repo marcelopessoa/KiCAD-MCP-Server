@@ -1815,6 +1815,8 @@ class EagleCommands:
         import result then carries {"ran": False} so callers can tell the
         difference between "clean" and "unverified").
         """
+        from utils.kicad_cli import cli_timeout
+
         cli = self._kicad_cli
         if not cli:
             return None
@@ -1824,7 +1826,7 @@ class EagleCommands:
                 [cli, "sch", "erc", sch_path, "-o", report_path],
                 capture_output=True,
                 text=True,
-                timeout=120,
+                timeout=cli_timeout(),
             )
             if result.returncode != 0 or not os.path.exists(report_path):
                 return None
@@ -1850,7 +1852,7 @@ class EagleCommands:
                 pass
 
     def _import_pcb(self, brd_file: str, pcb_out: str) -> Tuple[bool, str]:
-        from utils.kicad_cli import kicad_cli_not_found_message
+        from utils.kicad_cli import cli_timeout, kicad_cli_not_found_message
 
         cli = self._kicad_cli
         if not cli:
@@ -1860,7 +1862,7 @@ class EagleCommands:
                 [cli, "pcb", "import", "--format", "eagle", "--output", pcb_out, brd_file],
                 capture_output=True,
                 text=True,
-                timeout=60,
+                timeout=cli_timeout(),
             )
             if result.returncode == 0 and os.path.exists(pcb_out):
                 return True, "PCB imported successfully"

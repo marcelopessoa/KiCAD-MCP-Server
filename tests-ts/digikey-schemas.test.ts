@@ -1,11 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { ZodTypeAny } from "zod";
 import { registerDigiKeyApiTools } from "../src/tools/digikey-api.js";
-import {
-  computeCommandTimeout,
-  DEFAULT_COMMAND_TIMEOUT_MS,
-  LONG_COMMAND_TIMEOUT_MS,
-} from "../src/command-timeout.js";
+import { loadWatchdogPolicy } from "../src/command-timeout.js";
 
 // The central security claim of the Digi-Key integration is that no credential
 // can be passed as a tool argument, and that claim lives entirely in the shape
@@ -126,21 +122,12 @@ describe("Digi-Key tool schemas", () => {
 });
 
 describe("the library sweep's timeout budget", () => {
-  it("is not left on the 30 s default", () => {
+  it("is never cut off by a default ceiling", () => {
     // At the schema default of 25 symbols the client's own throttle spends
     // several seconds before any network latency, and the fallback can double
-    // the request count. Worse than timing out: the Python worker is
-    // single-threaded and keeps sweeping, so its late response is delivered to
-    // whichever tool call is pending by then.
-    const timeout = computeCommandTimeout("digikey_check_library_availability", {});
-    expect(timeout).toBeGreaterThan(DEFAULT_COMMAND_TIMEOUT_MS);
-    expect(timeout).toBe(LONG_COMMAND_TIMEOUT_MS);
-  });
-
-  it("leaves the two cheap Digi-Key tools on the default", () => {
-    // Both are a single search, so a long timeout would only delay reporting a
-    // hung request.
-    expect(computeCommandTimeout("digikey_search_parts", {})).toBe(DEFAULT_COMMAND_TIMEOUT_MS);
-    expect(computeCommandTimeout("digikey_test_connection", {})).toBe(DEFAULT_COMMAND_TIMEOUT_MS);
+    // the request count. The bridge no longer has a fixed per-command timeout
+    // (long commands are alerted and the user may interrupt them), so the
+    // sweep can only be stopped by an explicitly configured ceiling.
+    expect(loadWatchdogPolicy({}).hardTimeoutMs).toBe(0);
   });
 });

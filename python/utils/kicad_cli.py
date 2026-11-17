@@ -35,6 +35,29 @@ logger = logging.getLogger("kicad_interface")
 _ENV_VARS = ("KICAD_CLI", "KICAD_CLI_PATH")
 _cached_cli: Optional[str] = None
 
+_TIMEOUT_ENV = "KICAD_MCP_CLI_TIMEOUT_SEC"
+
+
+def cli_timeout() -> Optional[float]:
+    """Timeout, in seconds, for ``kicad-cli`` subprocesses — ``None`` (no limit) by default.
+
+    Fixed limits (60-180 s) failed ERC/exports on slow machines, where kicad-cli alone
+    can spend minutes parsing the symbol libraries. Long commands are now supervised by
+    the Node bridge instead: it alerts the client and lets the user interrupt, which
+    kills the kicad-cli child so the waiting ``subprocess.run`` returns.
+
+    Set ``KICAD_MCP_CLI_TIMEOUT_SEC`` to a positive number to restore a hard limit.
+    """
+    raw = os.environ.get(_TIMEOUT_ENV, "").strip()
+    if not raw:
+        return None
+    try:
+        seconds = float(raw)
+    except ValueError:
+        logger.warning(f"Ignoring invalid {_TIMEOUT_ENV}={raw!r}; no kicad-cli timeout")
+        return None
+    return seconds if seconds > 0 else None
+
 
 def _cli_name() -> str:
     """Executable basename for the current OS."""

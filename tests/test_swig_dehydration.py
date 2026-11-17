@@ -353,9 +353,11 @@ def test_run_drc_honors_timeout_sec_param():
     assert "45" in result["errorDetails"]
 
 
-def test_run_drc_clamps_extreme_timeout_values():
+def test_run_drc_clamps_extreme_timeout_values(monkeypatch):
     """Bad timeoutSec values must be clamped, not crash."""
     import subprocess as _sp
+
+    monkeypatch.delenv("KICAD_MCP_CLI_TIMEOUT_SEC", raising=False)
 
     from commands.design_rules import DesignRuleCommands
 
@@ -375,8 +377,9 @@ def test_run_drc_clamps_extreme_timeout_values():
     ):
         cmds.run_drc({"timeoutSec": -100})  # below clamp
         cmds.run_drc({"timeoutSec": 99999})  # above clamp
-        cmds.run_drc({"timeoutSec": "garbage"})  # unparseable → default 600
+        cmds.run_drc({"timeoutSec": "garbage"})  # unparseable → default (no limit)
 
     assert captured["timeouts"][0] == 10  # clamped to min
     assert captured["timeouts"][1] == 1800  # clamped to max
-    assert captured["timeouts"][2] == 600  # fallback default
+    # Default: no limit -- the Node watchdog alerts and lets the user interrupt.
+    assert captured["timeouts"][2] is None

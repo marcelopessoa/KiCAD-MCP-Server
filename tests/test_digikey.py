@@ -966,17 +966,16 @@ def test_the_sweep_default_is_small_enough_to_finish(monkeypatch, configured, li
     assert worst_case < 30.0, f"the default self-throttles for {worst_case}s before latency"
 
 
-def test_the_node_side_grants_the_sweep_an_extended_timeout():
-    """Without this the 30 s default fires mid-sweep.
+def test_the_node_side_never_cuts_the_sweep_off_by_default():
+    """A Node-side timeout firing mid-sweep loses the whole result set.
 
-    Since #382 the late response is discarded by request id instead of being
-    handed to the caller's next tool call, so what a timeout costs is this
-    command's whole result set -- every lookup in it already charged against the
-    caller's Digi-Key rate limit.
+    Every lookup in it was already charged against the caller's Digi-Key rate
+    limit. The bridge has no fixed per-command timeout any more (long commands
+    are alerted and the user may interrupt them): the only ceiling is an
+    explicitly configured KICAD_MCP_COMMAND_TIMEOUT_SEC, which defaults to off.
     """
     source = (REPO / "src" / "command-timeout.ts").read_text(encoding="utf-8")
-    listed = source.split("LONG_RUNNING_COMMANDS", 1)[1].split("]", 1)[0]
-    assert '"digikey_check_library_availability"' in listed
+    assert "hardTimeoutMs: secondsFromEnv(env.KICAD_MCP_COMMAND_TIMEOUT_SEC, 0)" in source
 
 
 # --- the Python-side schemas ----------------------------------------------- #

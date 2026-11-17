@@ -24,7 +24,7 @@ The [Model Context Protocol](https://modelcontextprotocol.io/) is an open standa
 **Key Capabilities:**
 
 - 233 tools registered, 173 of them indexed for keyword discovery
-- 173 tools across 16 categories with JSON Schema validation
+- 174 tools across 16 categories with JSON Schema validation
 - Keyword tool discovery via `search_tools` / `get_category_tools`
 - 23 dynamic resources exposing project state
 - Complete schematic workflow with 65 tools (authoring, batch edits, hierarchy, layout) and dynamic symbol loading (~10,000 symbols)
@@ -474,7 +474,7 @@ keyword instead of guessing:
 
 - **32 essential tools** that `search_tools` surfaces first, covering the
   operations nearly every session needs
-- **173 tools indexed across 16 categories** (board, component, export, drc,
+- **174 tools indexed across 16 categories** (board, component, export, drc,
   schematic, library, symbol_library, symbol_pins, schematic_hierarchy,
   schematic_layout, schematic_batch, routing, autoroute, validation,
   parts-registry, digikey)
@@ -553,7 +553,7 @@ Access project state without executing tools:
 
 ## Available Tools
 
-The server exposes every tool directly, so your assistant can call any of them without a discovery step -- just ask for what you want to accomplish. **173 tools** are additionally indexed into 16 functional categories, so `search_tools` and `get_category_tools` can find one by keyword.
+The server exposes every tool directly, so your assistant can call any of them without a discovery step -- just ask for what you want to accomplish. **174 tools** are additionally indexed into 16 functional categories, so `search_tools` and `get_category_tools` can find one by keyword.
 
 The lists below are a curated tour of the most useful tools, not the full set.
 For the complete, generated reference of all 233 tools -- including how each one
@@ -763,11 +763,12 @@ See [Footprint and Symbol Creator Guide](docs/FOOTPRINT_SYMBOL_CREATOR_GUIDE.md)
 
 See [Freerouting Guide](docs/FREEROUTING_GUIDE.md) for setup and usage.
 
-### UI Management (3 tools)
+### UI Management (4 tools)
 
 - `check_kicad_ui` - Check if KiCAD is running
 - `launch_kicad_ui` - Launch KiCAD application
 - `get_backend_state` - Report which backend (IPC or SWIG) is in use
+- `command_watchdog_settings` - Show or change, for the session, how long-running commands are supervised (see [Long-running commands](#long-running-commands))
 
 ### Parts Registry (3 tools)
 
@@ -1149,6 +1150,18 @@ With `--scope user` the server is available in every project; use `--scope proje
 
 Verify with `claude mcp list` — the server should report ✔ Connected.
 
+### Long-running commands
+
+There is no fixed per-command timeout: on a slow machine `kicad-cli` alone can spend minutes parsing the symbol libraries, and a timeout never stopped the work anyway. Instead every command is supervised:
+
+- every **30 s** the client gets a "still running" alert (a progress notification on the tool call, plus an MCP log message);
+- after **5 min** the user is asked (MCP elicitation) whether to keep waiting or interrupt, and asked again every 5 min;
+- cancelling the tool call (e.g. Esc in Claude Code) interrupts at any time.
+
+Interrupting kills the worker's subprocesses (`kicad-cli`, Freerouting, the zone-fill process), so the Python handler returns and the project/board loaded in memory is kept. If the worker still has not answered after a grace period it is restarted, and the loaded project must be reopened.
+
+The timings are environment variables (seconds; `0` disables): `KICAD_MCP_ALERT_INTERVAL_SEC` (30), `KICAD_MCP_INTERRUPT_PROMPT_SEC` (300), `KICAD_MCP_INTERRUPT_GRACE_SEC` (10), and an optional hard ceiling `KICAD_MCP_COMMAND_TIMEOUT_SEC` (0 = none). `KICAD_MCP_CLI_TIMEOUT_SEC` restores a limit on the `kicad-cli` subprocesses themselves (unset = none). The `command_watchdog_settings` tool reads or changes the first four for the running session without restarting the server.
+
 ### OpenCode (Windows)
 
 OpenCode uses a different MCP configuration schema than Claude Desktop. Use
@@ -1514,7 +1527,7 @@ How many Basic parts are available?
 - **JSON-RPC 2.0 Transport:** Bi-directional communication via STDIO
 - **Protocol Version:** MCP 2025-06-18
 - **Capabilities:** Tools (233), Resources (23)
-- **Tool discovery:** keyword search catalogue indexing 173 tools in 16 categories
+- **Tool discovery:** keyword search catalogue indexing 174 tools in 16 categories
 - **Error Handling:** Standard JSON-RPC error codes
 
 ### TypeScript Server (`src/`)

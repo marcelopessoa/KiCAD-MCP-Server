@@ -194,7 +194,7 @@ if utils_dir not in sys.path:
     sys.path.insert(0, utils_dir)
 
 # Import platform helper and add KiCAD paths
-from utils.kicad_cli import kicad_cli_not_found_message, resolve_kicad_cli
+from utils.kicad_cli import cli_timeout, kicad_cli_not_found_message, resolve_kicad_cli
 from utils.kicad_process import KiCADProcessManager, check_and_launch_kicad
 from utils.platform_helper import PlatformHelper
 from utils.project_settings_guard import preserve_project_settings
@@ -2943,7 +2943,7 @@ class KiCADInterface(SchematicHandlersMixin):
                 schematic_path,
             ]
             logger.info(f"Running: {' '.join(cmd)}")
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=cli_timeout())
 
             if result.returncode == 0:
                 return {"success": True, "outputPath": output_path, "format": fmt}
@@ -3042,7 +3042,7 @@ class KiCADInterface(SchematicHandlersMixin):
             cmd.append(board_path)
 
             logger.info(f"Running: {' '.join(cmd)}")
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=cli_timeout())
 
             if result.returncode != 0:
                 return {
@@ -3124,7 +3124,7 @@ class KiCADInterface(SchematicHandlersMixin):
             cmd.append(board_path)
 
             logger.info(f"Running: {' '.join(cmd)}")
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=cli_timeout())
 
             if result.returncode != 0:
                 return {
@@ -3203,7 +3203,7 @@ class KiCADInterface(SchematicHandlersMixin):
             cmd.append(board_path)
 
             logger.info(f"Running: {' '.join(cmd)}")
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=cli_timeout())
 
             if result.returncode != 0:
                 return {
@@ -3271,7 +3271,7 @@ class KiCADInterface(SchematicHandlersMixin):
             cmd.append(board_path)
 
             logger.info(f"Running: {' '.join(cmd)}")
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=cli_timeout())
 
             if result.returncode != 0:
                 return {
@@ -3326,7 +3326,7 @@ class KiCADInterface(SchematicHandlersMixin):
             cmd.append(board_path)
 
             logger.info(f"Running: {' '.join(cmd)}")
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=cli_timeout())
 
             if result.returncode != 0:
                 return {
@@ -3396,7 +3396,7 @@ class KiCADInterface(SchematicHandlersMixin):
             cmd.append(board_path)
 
             logger.info(f"Running: {' '.join(cmd)}")
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=cli_timeout())
 
             if result.returncode != 0:
                 return {
@@ -3475,7 +3475,7 @@ class KiCADInterface(SchematicHandlersMixin):
             cmd.append(board_path)
 
             logger.info(f"Running: {' '.join(cmd)}")
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=cli_timeout())
 
             if result.returncode != 0:
                 return {
@@ -3580,7 +3580,7 @@ class KiCADInterface(SchematicHandlersMixin):
             cmd.append(board_path)
 
             logger.info(f"Running: {' '.join(cmd)}")
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=cli_timeout())
 
             if result.returncode != 0:
                 return {
@@ -3684,7 +3684,7 @@ class KiCADInterface(SchematicHandlersMixin):
             cmd.append(board_path)
 
             logger.info(f"Running: {' '.join(cmd)}")
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=cli_timeout())
 
             if result.returncode != 0:
                 return {
@@ -3787,7 +3787,7 @@ class KiCADInterface(SchematicHandlersMixin):
             cmd.append(board_path)
 
             logger.info(f"Running: {' '.join(cmd)}")
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=cli_timeout())
 
             if result.returncode != 0:
                 return {
@@ -3888,7 +3888,7 @@ class KiCADInterface(SchematicHandlersMixin):
             cmd.append(board_path)
 
             logger.info(f"Running: {' '.join(cmd)}")
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=cli_timeout())
 
             if result.returncode != 0:
                 return {
@@ -4014,7 +4014,7 @@ class KiCADInterface(SchematicHandlersMixin):
             cmd.append(board_path)
 
             logger.info(f"Running: {' '.join(cmd)}")
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=cli_timeout())
 
             if result.returncode != 0:
                 return {
@@ -4097,7 +4097,7 @@ class KiCADInterface(SchematicHandlersMixin):
             cmd.append(schematic_path)
 
             logger.info(f"Running: {' '.join(cmd)}")
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=cli_timeout())
 
             if result.returncode != 0:
                 return {
@@ -4178,7 +4178,7 @@ class KiCADInterface(SchematicHandlersMixin):
             cmd.append(schematic_path)
 
             logger.info(f"Running: {' '.join(cmd)}")
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=cli_timeout())
 
             if result.returncode != 0:
                 return {
@@ -4253,7 +4253,7 @@ class KiCADInterface(SchematicHandlersMixin):
             cmd.append(schematic_path)
 
             logger.info(f"Running: {' '.join(cmd)}")
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=cli_timeout())
 
             if result.returncode != 0:
                 return {
@@ -4329,7 +4329,7 @@ class KiCADInterface(SchematicHandlersMixin):
             cmd.append(schematic_path)
 
             logger.info(f"Running: {' '.join(cmd)}")
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=cli_timeout())
 
             if result.returncode != 0:
                 return {
@@ -4401,7 +4401,7 @@ class KiCADInterface(SchematicHandlersMixin):
             cmd.append(schematic_path)
 
             logger.info(f"Running: {' '.join(cmd)}")
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=cli_timeout())
 
             if result.returncode != 0:
                 return {
@@ -4478,7 +4478,7 @@ class KiCADInterface(SchematicHandlersMixin):
             cmd.append(schematic_path)
 
             logger.info(f"Running: {' '.join(cmd)}")
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=cli_timeout())
 
             if result.returncode != 0:
                 return {
@@ -4533,7 +4533,7 @@ class KiCADInterface(SchematicHandlersMixin):
             cmd.append(schematic_path)
 
             logger.info(f"Running: {' '.join(cmd)}")
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=cli_timeout())
 
             if result.returncode != 0:
                 return {
@@ -4589,7 +4589,7 @@ class KiCADInterface(SchematicHandlersMixin):
                     schematic_path,
                 ]
                 logger.info(f"Running: {' '.join(cmd)}")
-                result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=cli_timeout())
 
                 if result.returncode != 0:
                     return {
@@ -4931,7 +4931,8 @@ print("ok")
                     [sys.executable, "-c", script],
                     capture_output=True,
                     text=True,
-                    timeout=60,
+                    # Isolated child: the Node watchdog can interrupt it.
+                    timeout=cli_timeout(),
                 )
                 if result.returncode == 0 and "ok" in result.stdout:
                     # Reload board after subprocess modified it
@@ -4965,7 +4966,7 @@ print("ok")
                         "details": (result.stderr[:300] if result.stderr else result.stdout[:300]),
                     }
             except subprocess.TimeoutExpired:
-                logger.warning("Zone fill subprocess timed out after 60s")
+                logger.warning(f"Zone fill subprocess timed out after {cli_timeout()}s")
                 return {
                     "success": False,
                     "message": "Zone fill timed out — zones are defined and will fill when opened in KiCAD (press B). Continuing is safe.",

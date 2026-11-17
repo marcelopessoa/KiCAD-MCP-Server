@@ -9,7 +9,10 @@ import { spawn, exec, execSync, ChildProcess } from "child_process";
 import { existsSync, readdirSync } from "fs";
 import { join, dirname } from "path";
 import { logger } from "./logger.js";
-import { computeCommandTimeout, DEFAULT_COMMAND_TIMEOUT_MS } from "./command-timeout.js";
+import { ElicitResultSchema } from "@modelcontextprotocol/sdk/types.js";
+import { formatElapsed, loadWatchdogPolicy, WatchdogPolicy } from "./command-timeout.js";
+import { instrumentToolRegistration, ToolCallContext, toolCallContext } from "./tool-context.js";
+import { killDescendants } from "./utils/process-tree.js";
 
 // Import tool registration functions
 import { registerProjectTools } from "./tools/project.js";
@@ -36,6 +39,7 @@ import { registerEagleTools } from "./tools/eagle.js";
 import { registerPcbImportTools } from "./tools/pcb-import.js";
 import { registerValidationTools } from "./tools/validation.js";
 import { registerRouterTools } from "./tools/router.js";
+import { registerWatchdogTools } from "./tools/watchdog.js";
 
 // Import resource registration functions
 import { registerProjectResources } from "./resources/project.js";
@@ -224,31 +228,58 @@ function findPythonExecutable(scriptPath: string): string {
 /**
  * KiCAD MCP Server class
  */
+/** A request queued for the Python worker. `timeout` is the optional hard ceiling (0 = none). */
+interface QueuedRequest {
+  request: {
+    command: string;
+    params: any;
+    timeout: number;
+    requestId: number;
+  };
+  resolve: Function;
+  reject: Function;
+  ctx?: ToolCallContext;
+}
+
+/** The request the Python worker is executing, plus its watchdog state. */
+interface PendingHandler {
+  requestId: number;
+  resolve: Function;
+  reject: Function;
+  timeoutHandle?: NodeJS.Timeout;
+  command?: string;
+  startedAt?: number;
+  ctx?: ToolCallContext;
+  alertTimer?: NodeJS.Timeout;
+  promptTimer?: NodeJS.Timeout;
+  nextPromptAt?: number;
+  /** Aborts the open "interrupt?" question when the command finishes first. */
+  promptAbort?: AbortController;
+  interrupting?: boolean;
+  interruptReason?: string;
+  interruptedAfter?: string;
+  /** Called once the handler has been settled (used while waiting after an interrupt). */
+  onSettled?: () => void;
+}
+
 export class KiCADMcpServer {
   private server: McpServer;
   private pythonProcess: ChildProcess | null = null;
   private kicadScriptPath: string;
   private stdioTransport!: StdioServerTransport;
-  private requestQueue: Array<{
-    request: {
-      command: string;
-      params: any;
-      timeout: number;
-      requestId: number;
-    };
-    resolve: Function;
-    reject: Function;
-  }> = [];
+  private requestQueue: QueuedRequest[] = [];
   private processingRequest = false;
   private responseBuffer: string = "";
   /** Monotonic bridge-local ID; Python echoes it back as `_requestId` (#373). */
   private nextInternalRequestId = 1;
-  private currentRequestHandler: {
-    requestId: number;
-    resolve: Function;
-    reject: Function;
-    timeoutHandle: NodeJS.Timeout;
-  } | null = null;
+  private currentRequestHandler: PendingHandler | null = null;
+  /** Alerts / interrupt prompt / optional hard ceiling (see command-timeout.ts). */
+  private watchdogPolicy: WatchdogPolicy = loadWatchdogPolicy();
+  /** Remembered from start() so an interrupted, unresponsive worker can be respawned. */
+  private pythonExe: string | null = null;
+  private pythonPath: string | undefined;
+  /** Logged once: whether the client's tool calls carry a progress token. */
+  private progressSupportLogged = false;
 
   /** Resolved when Python prints {"type":"ready"} — stdin loop is live. */
   private readyPromise: Promise<void>;
@@ -275,11 +306,30 @@ export class KiCADMcpServer {
     }
 
     // Initialize the MCP server
-    this.server = new McpServer({
-      name: "kicad-mcp-server",
-      version: "2.7.0",
-      description: "MCP server for KiCAD PCB design operations",
-    });
+    this.server = new McpServer(
+      {
+        name: "kicad-mcp-server",
+        version: "2.7.0",
+        description: "MCP server for KiCAD PCB design operations",
+      },
+      // logging: long-command alerts are also sent as notifications/message.
+      { capabilities: { logging: {} } },
+    );
+    // Must run before registerAll(): gives callKicadScript the calling tool's
+    // cancellation signal and progress token (see tool-context.ts).
+    instrumentToolRegistration(this.server);
+    // Diagnostics: what the client supports decides how long-command alerts
+    // (progress, log messages, the interrupt question) reach the user.
+    const previousOnInitialized = this.server.server.oninitialized;
+    this.server.server.oninitialized = () => {
+      previousOnInitialized?.();
+      const client = this.server.server.getClientVersion();
+      const caps = this.server.server.getClientCapabilities();
+      logger.info(
+        `MCP client: ${client?.name ?? "?"} ${client?.version ?? ""}; ` +
+          `elicitation: ${caps?.elicitation ? "yes" : "no"}; capabilities: ${JSON.stringify(caps ?? {})}`,
+      );
+    };
     // Create the ready promise (resolved when Python sends {"type":"ready"})
     this.readyPromise = new Promise((resolve, reject) => {
       this.resolveReady = resolve;
@@ -327,6 +377,12 @@ export class KiCADMcpServer {
     registerEagleTools(this.server, this.callKicadScript.bind(this));
     registerPcbImportTools(this.server, this.callKicadScript.bind(this));
     registerValidationTools(this.server, this.callKicadScript.bind(this));
+    registerWatchdogTools(this.server, {
+      get: () => this.watchdogPolicy,
+      set: (policy) => {
+        this.watchdogPolicy = policy;
+      },
+    });
 
     // Register all resources
     registerProjectResources(this.server, this.callKicadScript.bind(this));
@@ -548,73 +604,14 @@ export class KiCADMcpServer {
       if (derivedSitePackages && !process.env.PYTHONPATH) {
         logger.info(`Using KiCAD site-packages: ${derivedSitePackages}`);
       }
-      this.pythonProcess = spawn(pythonExe, [this.kicadScriptPath], {
-        stdio: ["pipe", "pipe", "pipe"],
-        env: {
-          ...process.env,
-          PYTHONPATH:
-            process.env.PYTHONPATH ||
-            derivedSitePackages ||
-            "C:/Program Files/KiCad/9.0/lib/python3/dist-packages",
-        },
-      });
+      this.pythonExe = pythonExe;
+      this.pythonPath =
+        process.env.PYTHONPATH ||
+        derivedSitePackages ||
+        "C:/Program Files/KiCad/9.0/lib/python3/dist-packages";
 
-      // Listen for process exit
-      this.pythonProcess.on("exit", (code, signal) => {
-        logger.warn(`Python process exited with code ${code} and signal ${signal}`);
-        this.pythonProcess = null;
-      });
-
-      // Listen for process errors
-      this.pythonProcess.on("error", (err) => {
-        logger.error(`Python process error: ${err.message}`);
-      });
-
-      // Set up error logging for stderr
-      if (this.pythonProcess.stderr) {
-        this.pythonProcess.stderr.on("data", (data: Buffer) => {
-          logger.error(`Python stderr: ${data.toString()}`);
-        });
-      }
-
-      // ——— Phase 1: stdout handler that detects the READY marker ———
-      // Before Python reaches main() it may spend 55-65 s on wxApp init.
-      // The stdin loop is only live after main() prints {"type":"ready"}.
-      // Until then we buffer everything and scan for that exact JSON line.
-      if (this.pythonProcess.stdout) {
-        this.pythonProcess.stdout.on("data", (data: Buffer) => {
-          if (this.readyDetected) {
-            // Persistent handler (post-warm-up)
-            this.handlePythonResponse(data);
-          } else {
-            this.startupBuffer += data.toString();
-            const lines = this.startupBuffer.split("\n");
-            for (let i = 0; i < lines.length; i++) {
-              const line = lines[i].trim();
-              if (!line) continue;
-              try {
-                const obj = JSON.parse(line);
-                if (obj.type === "ready") {
-                  logger.info("Python process READY — stdin loop is live");
-                  this.readyDetected = true;
-                  // Replay any remaining buffered lines through the persistent handler
-                  const remaining = lines.slice(i + 1).join("\n");
-                  if (remaining.trim()) {
-                    this.handlePythonResponse(Buffer.from(remaining));
-                  }
-                  this.resolveReady();
-                  // Drain any tool calls that queued while Python was
-                  // initialising (the ready gate in processNextRequest).
-                  setTimeout(() => this.processNextRequest(), 0);
-                  return;
-                }
-              } catch {
-                // Not valid JSON yet; keep buffering
-              }
-            }
-          }
-        });
-      }
+      // ——— Phase 1: spawn the worker (stdout handler detects READY) ———
+      this.spawnPythonWorker();
 
       // ——— Phase 2: wait for Python READY ———
       logger.info("Waiting for Python process to be ready...");
@@ -636,6 +633,121 @@ export class KiCADMcpServer {
     } catch (error) {
       logger.error(`Failed to start KiCAD MCP server: ${error}`);
       throw error;
+    }
+  }
+
+  /**
+   * Spawn the Python worker and wire its stdout/stderr/exit handlers.
+   *
+   * Every handler checks that its process is still the current worker, so a
+   * worker replaced by restartPythonWorker() can neither clear the new one nor
+   * feed its late output into the new response buffer.
+   */
+  private spawnPythonWorker(): void {
+    const proc = spawn(this.pythonExe!, [this.kicadScriptPath], {
+      stdio: ["pipe", "pipe", "pipe"],
+      env: { ...process.env, PYTHONPATH: this.pythonPath },
+    });
+    this.pythonProcess = proc;
+
+    proc.on("exit", (code, signal) => {
+      logger.warn(`Python process exited with code ${code} and signal ${signal}`);
+      if (this.pythonProcess !== proc) return; // replaced on purpose
+      this.pythonProcess = null;
+      // With no fixed timeout, a crashed worker would otherwise leave the
+      // pending call (and everything queued behind it) waiting forever.
+      this.failAllPending(
+        `O worker Python terminou inesperadamente (code ${code}, signal ${signal})`,
+      );
+    });
+
+    proc.on("error", (err) => {
+      logger.error(`Python process error: ${err.message}`);
+    });
+
+    proc.stderr?.on("data", (data: Buffer) => {
+      logger.error(`Python stderr: ${data.toString()}`);
+    });
+
+    // Before Python reaches main() it may spend 55-65 s on wxApp init.
+    // The stdin loop is only live after main() prints {"type":"ready"}.
+    // Until then we buffer everything and scan for that exact JSON line.
+    proc.stdout?.on("data", (data: Buffer) => {
+      if (this.pythonProcess !== proc) return;
+      if (this.readyDetected) {
+        // Persistent handler (post-warm-up)
+        this.handlePythonResponse(data);
+        return;
+      }
+      this.startupBuffer += data.toString();
+      const lines = this.startupBuffer.split("\n");
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i].trim();
+        if (!line) continue;
+        try {
+          const obj = JSON.parse(line);
+          if (obj.type === "ready") {
+            logger.info("Python process READY — stdin loop is live");
+            this.readyDetected = true;
+            // Replay any remaining buffered lines through the persistent handler
+            const remaining = lines.slice(i + 1).join("\n");
+            if (remaining.trim()) {
+              this.handlePythonResponse(Buffer.from(remaining));
+            }
+            this.resolveReady();
+            // Drain any tool calls that queued while Python was
+            // initialising (the ready gate in processNextRequest).
+            setTimeout(() => this.processNextRequest(), 0);
+            return;
+          }
+        } catch {
+          // Not valid JSON yet; keep buffering
+        }
+      }
+    });
+  }
+
+  /**
+   * Replace an unresponsive worker with a fresh one. The in-memory
+   * project/board is lost; queued requests wait for the new READY.
+   */
+  private async restartPythonWorker(): Promise<void> {
+    const old = this.pythonProcess;
+    if (old?.pid) await killDescendants(old.pid, 1_000);
+
+    this.pythonProcess = null; // the old worker's exit handler now ignores it
+    try {
+      old?.kill("SIGKILL");
+    } catch {
+      // already gone
+    }
+
+    this.readyDetected = false;
+    this.startupBuffer = "";
+    this.responseBuffer = "";
+    this.readyPromise = new Promise((resolve, reject) => {
+      this.resolveReady = resolve;
+      this.rejectReady = reject;
+    });
+    this.readyPromise.catch(() => undefined);
+
+    logger.warn("Restarting the Python worker after an interrupt");
+    this.spawnPythonWorker();
+  }
+
+  /** Reject the running request and everything queued (worker gone). */
+  private failAllPending(reason: string): void {
+    const handler = this.currentRequestHandler;
+    if (handler) {
+      this.stopWatchdogTimers(handler);
+      clearTimeout(handler.timeoutHandle);
+      this.currentRequestHandler = null;
+      this.processingRequest = false;
+      handler.reject(new Error(`${reason} durante "${handler.command ?? "?"}".`));
+      handler.onSettled?.();
+    }
+    for (const entry of this.requestQueue.splice(0)) {
+      entry.reject(new Error(`${reason}; o comando "${entry.request.command}" não foi executado.`));
     }
   }
 
@@ -751,6 +863,17 @@ export class KiCADMcpServer {
    * @returns The result of the command execution
    */
   private async callKicadScript(command: string, params: any): Promise<any> {
+    // Context of the MCP tool call that issued this command (tool-context.ts):
+    // cancellation signal and progress token. Undefined for resources/warm-up.
+    const ctx = toolCallContext.getStore();
+    if (ctx && !this.progressSupportLogged) {
+      this.progressSupportLogged = true;
+      logger.info(
+        `Client tool calls carry a progress token: ${ctx.progressToken !== undefined ? "yes" : "no"} ` +
+          `(long-command alerts ${ctx.progressToken !== undefined ? "are" : "are NOT"} shown as tool progress)`,
+      );
+    }
+
     return new Promise((resolve, reject) => {
       // Check if Python process is running
       if (!this.pythonProcess) {
@@ -758,24 +881,48 @@ export class KiCADMcpServer {
         reject(new Error("Python process for KiCAD scripting is not running"));
         return;
       }
-
-      // Determine timeout based on command type (see src/command-timeout.ts).
-      const commandTimeout = computeCommandTimeout(command, params);
-      if (commandTimeout !== DEFAULT_COMMAND_TIMEOUT_MS) {
-        logger.info(`Using extended timeout (${commandTimeout / 1000}s) for command: ${command}`);
+      if (ctx?.signal?.aborted) {
+        reject(new Error(`Comando "${command}" cancelado pelo cliente antes de iniciar`));
+        return;
       }
 
-      // Add request to queue with timeout info
-      this.requestQueue.push({
-        request: {
-          command,
-          params,
-          timeout: commandTimeout,
-          requestId: this.allocateInternalRequestId(),
+      const requestId = this.allocateInternalRequestId();
+      let onAbort: (() => void) | undefined;
+      const detach = () => {
+        if (onAbort) ctx?.signal?.removeEventListener("abort", onAbort);
+      };
+
+      // No fixed timeout: the watchdog alerts and offers to interrupt instead
+      // (command-timeout.ts). `timeout` is only the optional hard ceiling.
+      const entry: QueuedRequest = {
+        request: { command, params, timeout: this.watchdogPolicy.hardTimeoutMs, requestId },
+        resolve: (value: any) => {
+          detach();
+          resolve(value);
         },
-        resolve,
-        reject,
-      });
+        reject: (error: any) => {
+          detach();
+          reject(error);
+        },
+        ctx,
+      };
+
+      // Client cancelled the tool call (e.g. Esc): drop it if still queued,
+      // interrupt it if the worker is already running it.
+      if (ctx?.signal) {
+        onAbort = () => {
+          const queued = this.requestQueue.indexOf(entry);
+          if (queued >= 0) {
+            this.requestQueue.splice(queued, 1);
+            entry.reject(new Error(`Comando "${command}" cancelado pelo cliente antes de iniciar`));
+          } else if (this.currentRequestHandler?.requestId === requestId) {
+            void this.interruptCurrentRequest(this.currentRequestHandler, "cancelado pelo cliente");
+          }
+        };
+        ctx.signal.addEventListener("abort", onAbort, { once: true });
+      }
+
+      this.requestQueue.push(entry);
 
       // Process the queue if not already processing
       if (!this.processingRequest) {
@@ -857,13 +1004,275 @@ export class KiCADMcpServer {
           `${result.success ? "success" : "failure"}`,
       );
 
+      this.stopWatchdogTimers(handler);
       clearTimeout(handler.timeoutHandle);
       this.currentRequestHandler = null;
       this.processingRequest = false;
-      handler.resolve(result);
+      if (handler.interrupting && result?.success !== true) {
+        // The answer to an interrupted command is the failure caused by
+        // killing its subprocess; report the interruption instead. (A command
+        // that still managed to succeed is delivered normally.)
+        handler.reject(new Error(this.interruptedMessage(handler, result)));
+      } else {
+        handler.resolve(result);
+      }
+      handler.onSettled?.();
       setTimeout(() => this.processNextRequest(), 0);
       return;
     }
+  }
+
+  private interruptedMessage(handler: PendingHandler, result?: any): string {
+    const workerSaid = result?.message ? ` Resposta do worker: ${result.message}` : "";
+    return (
+      `Comando "${handler.command ?? "?"}" interrompido após ${handler.interruptedAfter ?? "?"} ` +
+      `(${handler.interruptReason ?? "interrompido"}). O subprocesso foi encerrado e o worker ` +
+      `continua ativo: o projeto/placa carregados em memória foram preservados.${workerSaid}`
+    );
+  }
+
+  // ————————————————————————————————————————————————————————————————
+  // Long-command watchdog (policy in command-timeout.ts)
+  // ————————————————————————————————————————————————————————————————
+
+  private startWatchdog(handler: PendingHandler): void {
+    const { alertIntervalMs } = this.watchdogPolicy;
+    if (alertIntervalMs > 0) {
+      handler.alertTimer = setInterval(() => this.emitLongCommandAlert(handler), alertIntervalMs);
+    }
+    this.schedulePrompt(handler);
+  }
+
+  private stopWatchdogTimers(handler: PendingHandler): void {
+    clearInterval(handler.alertTimer);
+    clearTimeout(handler.promptTimer);
+    handler.alertTimer = undefined;
+    handler.promptTimer = undefined;
+    handler.nextPromptAt = undefined;
+    handler.promptAbort?.abort(); // closes an open "interrupt?" question
+    handler.promptAbort = undefined;
+  }
+
+  private isActive(handler: PendingHandler): boolean {
+    return this.currentRequestHandler === handler && !handler.interrupting;
+  }
+
+  private elapsedMs(handler: PendingHandler): number {
+    return Date.now() - (handler.startedAt ?? Date.now());
+  }
+
+  /**
+   * Alert the user: progress notification on the tool call (when the client
+   * asked for progress), MCP log message, and the server log.
+   */
+  private notifyClient(
+    handler: PendingHandler,
+    message: string,
+    level: "info" | "warning" = "warning",
+  ): void {
+    if (level === "warning") logger.warn(message);
+    else logger.info(message);
+
+    const ctx = handler.ctx;
+    if (ctx?.progressToken !== undefined && ctx.sendNotification) {
+      // Progress must increase across the whole tool call, which may span
+      // several bridge commands.
+      const elapsedSec = Math.round(this.elapsedMs(handler) / 1000);
+      const progress = Math.max(elapsedSec, (ctx.lastProgress ?? 0) + 1);
+      ctx.lastProgress = progress;
+      ctx
+        .sendNotification({
+          method: "notifications/progress",
+          params: { progressToken: ctx.progressToken, progress, message },
+        })
+        .catch((err) => logger.debug(`progress notification failed: ${err}`));
+    }
+
+    this.server.server
+      .sendLoggingMessage({ level, logger: "kicad-mcp", data: message })
+      .catch(() => undefined); // not connected (tests) or client gone
+  }
+
+  private emitLongCommandAlert(handler: PendingHandler): void {
+    if (!this.isActive(handler)) return;
+    let hint: string;
+    if (handler.promptAbort) {
+      hint = "aguardando sua resposta sobre interromper";
+    } else if (handler.nextPromptAt) {
+      const remaining = formatElapsed(Math.max(0, handler.nextPromptAt - Date.now()));
+      hint = `opção de interromper em ${remaining}; Esc cancela já`;
+    } else {
+      hint = "Esc cancela";
+    }
+    this.notifyClient(
+      handler,
+      `KiCad: "${handler.command}" em execução há ${formatElapsed(this.elapsedMs(handler))} (${hint})`,
+    );
+  }
+
+  private schedulePrompt(handler: PendingHandler): void {
+    const delay = this.watchdogPolicy.interruptPromptMs;
+    if (delay <= 0 || !this.isActive(handler)) return;
+    handler.nextPromptAt = Date.now() + delay;
+    handler.promptTimer = setTimeout(() => void this.promptInterrupt(handler), delay);
+  }
+
+  /**
+   * Ask the user (MCP elicitation) whether to keep waiting or interrupt.
+   * Without elicitation support the client is told how to cancel instead.
+   * Either way the question comes back after another interval.
+   */
+  private async promptInterrupt(handler: PendingHandler): Promise<void> {
+    handler.promptTimer = undefined;
+    handler.nextPromptAt = undefined;
+    if (!this.isActive(handler)) return;
+
+    const command = handler.command ?? "?";
+    const elapsed = formatElapsed(this.elapsedMs(handler));
+    const reask = formatElapsed(this.watchdogPolicy.interruptPromptMs);
+
+    if (!this.server.server.getClientCapabilities()?.elicitation) {
+      this.notifyClient(
+        handler,
+        `O comando KiCad "${command}" está rodando há ${elapsed}. Este cliente MCP não permite ` +
+          `perguntas: cancele a chamada (Esc) para interromper. Continuo aguardando.`,
+      );
+      this.schedulePrompt(handler);
+      return;
+    }
+
+    const controller = new AbortController();
+    handler.promptAbort = controller;
+    this.notifyClient(
+      handler,
+      `O comando KiCad "${command}" está rodando há ${elapsed}: perguntando se deve ser interrompido.`,
+    );
+
+    try {
+      const request = {
+        method: "elicitation/create",
+        params: {
+          message:
+            `O comando KiCad "${command}" está rodando há ${elapsed}. Interromper? ` +
+            `"Interromper" encerra o subprocesso do KiCad (a placa em memória é preservada); ` +
+            `"Continuar" pergunta de novo em ${reask}.`,
+          requestedSchema: {
+            type: "object",
+            properties: {
+              acao: {
+                type: "string",
+                title: "O que fazer?",
+                enum: ["continuar", "interromper"],
+                enumNames: ["Continuar aguardando", "Interromper o comando"],
+              },
+            },
+            required: ["acao"],
+          },
+        },
+      };
+      // The question stays open until answered or until the next cycle.
+      const options = {
+        signal: controller.signal,
+        timeout: Math.max(60_000, this.watchdogPolicy.interruptPromptMs),
+      };
+      const result: any = handler.ctx?.sendRequest
+        ? await handler.ctx.sendRequest(request, ElicitResultSchema, options)
+        : await this.server.server.request(request as any, ElicitResultSchema, options);
+
+      if (!this.isActive(handler)) return;
+      if (result?.action === "accept" && result.content?.acao === "interromper") {
+        handler.promptAbort = undefined;
+        await this.interruptCurrentRequest(handler, "interrompido pelo usuário");
+        return;
+      }
+      const answer =
+        result?.action === "accept"
+          ? "você escolheu continuar"
+          : result?.action === "decline"
+            ? "pergunta recusada"
+            : "pergunta fechada";
+      this.notifyClient(
+        handler,
+        `KiCad "${command}": ${answer}; continuo aguardando e pergunto de novo em ${reask}.`,
+        "info",
+      );
+    } catch (error: any) {
+      if (controller.signal.aborted || !this.isActive(handler)) return; // finished meanwhile
+      this.notifyClient(
+        handler,
+        `KiCad "${command}": sem resposta à pergunta (${error?.message ?? error}); ` +
+          `continuo aguardando (Esc cancela).`,
+      );
+    } finally {
+      if (handler.promptAbort === controller) handler.promptAbort = undefined;
+    }
+    this.schedulePrompt(handler);
+  }
+
+  /** Resolves true once `handler` is settled, false if `ms` elapse first. */
+  private waitForHandlerSettled(handler: PendingHandler, ms: number): Promise<boolean> {
+    return new Promise((resolve) => {
+      if (this.currentRequestHandler !== handler) {
+        resolve(true);
+        return;
+      }
+      const timer = setTimeout(() => {
+        handler.onSettled = undefined;
+        resolve(false);
+      }, ms);
+      handler.onSettled = () => {
+        clearTimeout(timer);
+        resolve(true);
+      };
+    });
+  }
+
+  /**
+   * Interrupt the running command: kill the worker's subprocesses so the
+   * Python handler returns (board kept in memory); if the worker still does
+   * not answer within the grace period, restart it.
+   */
+  private async interruptCurrentRequest(handler: PendingHandler, reason: string): Promise<void> {
+    if (!this.isActive(handler)) return;
+    handler.interrupting = true;
+    handler.interruptReason = reason;
+    handler.interruptedAfter = formatElapsed(this.elapsedMs(handler));
+    this.stopWatchdogTimers(handler);
+    clearTimeout(handler.timeoutHandle);
+
+    const command = handler.command ?? "?";
+    logger.warn(`Interrupting "${command}" after ${handler.interruptedAfter}: ${reason}`);
+
+    const worker = this.pythonProcess;
+    const killed = worker?.pid ? await killDescendants(worker.pid) : [];
+    if (this.currentRequestHandler !== handler) return; // answered while killing
+
+    const grace = this.watchdogPolicy.interruptGraceMs;
+    this.notifyClient(
+      handler,
+      `Interrompendo "${command}" (${reason}): ${killed.length} subprocesso(s) encerrado(s); ` +
+        `aguardando o worker responder (até ${formatElapsed(grace)}).`,
+    );
+    if (await this.waitForHandlerSettled(handler, grace)) return;
+    if (this.currentRequestHandler !== handler) return;
+
+    // The worker is stuck inside in-process code: replace it.
+    this.currentRequestHandler = null;
+    this.processingRequest = false;
+    handler.reject(
+      new Error(
+        `Comando "${command}" interrompido após ${handler.interruptedAfter} (${reason}). ` +
+          `O worker Python não respondeu em ${formatElapsed(grace)} e foi reiniciado: o ` +
+          `projeto/placa que estavam em memória foram descartados (alterações não salvas ` +
+          `perdidas). Reabra com open_project ou open_board.`,
+      ),
+    );
+    if (this.pythonExe) {
+      await this.restartPythonWorker();
+    } else {
+      logger.error("Cannot restart the Python worker: it was never started by start()");
+    }
+    setTimeout(() => this.processNextRequest(), 0);
   }
 
   private allocateInternalRequestId(): number {
@@ -891,7 +1300,7 @@ export class KiCADMcpServer {
     this.processingRequest = true;
 
     // Get the next request
-    const { request, resolve, reject } = this.requestQueue.shift()!;
+    const { request, resolve, reject, ctx } = this.requestQueue.shift()!;
 
     try {
       logger.debug(`Processing KiCAD command: ${request.command}`);
@@ -899,30 +1308,30 @@ export class KiCADMcpServer {
       // Format the command and parameters as JSON
       const requestStr = JSON.stringify(request);
 
-      // Set a timeout (use command-specific timeout or default)
-      const timeoutDuration = request.timeout || 30000;
-      const timeoutHandle = setTimeout(() => {
-        // The response may have arrived between the timer firing and this
-        // callback running; only abandon our own request (#373).
-        if (this.currentRequestHandler?.requestId !== request.requestId) return;
-        logger.error(`Command timeout after ${timeoutDuration / 1000}s: ${request.command}`);
-        logger.error(`Buffer contents: ${this.responseBuffer.substring(0, 200)}...`);
+      const handler: PendingHandler = {
+        requestId: request.requestId,
+        resolve,
+        reject,
+        command: request.command,
+        startedAt: Date.now(),
+        ctx,
+      };
 
-        // Clear state. The buffer is left alone: a partial frame from the
-        // timed-out command completes on the next data chunk and is then
-        // discarded by ID, not delivered to the next request.
-        this.currentRequestHandler = null;
-        this.processingRequest = false;
+      // No fixed timeout. Only an explicitly configured hard ceiling
+      // (KICAD_MCP_COMMAND_TIMEOUT_SEC) interrupts on its own — and it really
+      // interrupts, instead of abandoning a command the worker keeps running.
+      if (request.timeout > 0) {
+        handler.timeoutHandle = setTimeout(() => {
+          void this.interruptCurrentRequest(
+            handler,
+            `limite de ${formatElapsed(request.timeout)} atingido (KICAD_MCP_COMMAND_TIMEOUT_SEC)`,
+          );
+        }, request.timeout);
+      }
 
-        // Reject the promise
-        reject(new Error(`Command timeout after ${timeoutDuration / 1000}s: ${request.command}`));
-
-        // Process next request
-        setTimeout(() => this.processNextRequest(), 0);
-      }, timeoutDuration);
-
-      // Store the current request handler
-      this.currentRequestHandler = { requestId: request.requestId, resolve, reject, timeoutHandle };
+      // Store the current request handler and start alerting if it runs long
+      this.currentRequestHandler = handler;
+      this.startWatchdog(handler);
 
       // Write the request to the Python process
       logger.debug(`Sending request: ${requestStr}`);
@@ -930,7 +1339,11 @@ export class KiCADMcpServer {
     } catch (error) {
       logger.error(`Error processing request: ${error}`);
 
-      // Reset processing flag
+      // Reset processing flag (and the watchdog, if it was already started)
+      if (this.currentRequestHandler) {
+        this.stopWatchdogTimers(this.currentRequestHandler);
+        clearTimeout(this.currentRequestHandler.timeoutHandle);
+      }
       this.processingRequest = false;
       this.currentRequestHandler = null;
 

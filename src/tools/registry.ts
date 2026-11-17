@@ -309,6 +309,9 @@ export const directToolNames = [
   // UI management
   "get_backend_state",
   "check_kicad_ui",
+
+  // Long-running command supervision (alerts / interrupt prompt timings)
+  "command_watchdog_settings",
 ];
 
 // Build lookup maps at module load time

@@ -54,7 +54,7 @@ class PcbImportCommands:
         format       : auto|pads|altium|eagle|cadstar|fabmaster|pcad|solidworks (optional; default "auto")
         reportFormat : none|json|text                (optional; default "none")
         """
-        from utils.kicad_cli import kicad_cli_not_found_message
+        from utils.kicad_cli import cli_timeout, kicad_cli_not_found_message
 
         input_file: Optional[str] = params.get("inputFile")
         output_file: Optional[str] = params.get("outputFile")
@@ -99,7 +99,7 @@ class PcbImportCommands:
         cmd.append(input_file)
 
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=cli_timeout())
         except Exception as e:  # noqa: BLE001 - surface subprocess failures as tool errors
             return {"success": False, "error": str(e)}
 

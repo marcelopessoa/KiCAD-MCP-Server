@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import pcbnew
 from PIL import Image
-from utils.kicad_cli import kicad_cli_not_found_message, resolve_kicad_cli
+from utils.kicad_cli import cli_timeout, kicad_cli_not_found_message, resolve_kicad_cli
 
 logger = logging.getLogger("kicad_interface")
 
@@ -221,7 +221,9 @@ class BoardViewCommands:
                 cmd.append(pcb_path)
 
                 try:
-                    result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+                    result = subprocess.run(
+                        cmd, capture_output=True, text=True, timeout=cli_timeout()
+                    )
                 except subprocess.TimeoutExpired:
                     return {
                         "success": False,

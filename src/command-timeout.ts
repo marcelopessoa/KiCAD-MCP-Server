@@ -1,81 +1,74 @@
 /**
- * Per-command timeout policy for the Python worker bridge.
+ * Long-command policy for the Python worker bridge.
  *
- * Kept as a pure function so the policy is unit-testable without spawning a
- * worker — the same reason `tools/registry.ts` and `tools/tool-response.ts`
- * are separated out.
- */
-
-/** Fallback for commands that should answer promptly. */
-export const DEFAULT_COMMAND_TIMEOUT_MS = 30_000;
-
-/** Blanket allowance for operations that are slow but not caller-tunable. */
-export const LONG_COMMAND_TIMEOUT_MS = 600_000;
-
-/**
- * Commands whose cost scales with the size of the thing being worked on rather
- * than with a parameter the caller can reason about up front.
+ * There is no fixed per-command timeout. The old 30 s ceiling failed commands
+ * that were still making progress on a slow machine (e.g. WSL under load, where
+ * kicad-cli alone needs minutes to parse the symbol libraries), and it never
+ * stopped the work anyway: the Python worker kept running the abandoned command
+ * and the next request simply queued behind it.
  *
- * `digikey_check_library_availability` is here for a different reason to the
- * rest: it issues one or two rate-limited HTTP requests per symbol and
- * self-throttles between them, so even its reduced default of 25 symbols cannot
- * finish inside `DEFAULT_COMMAND_TIMEOUT_MS` once network latency is included.
- * Since #382 a late response is discarded by request id rather than mis-delivered
- * to the next call, so the cost of timing out is now confined to this command —
- * but it is still the whole sweep's results, every one of them already paid for
- * against the caller's rate limit.
- */
-export const LONG_RUNNING_COMMANDS = [
-  "run_drc",
-  "export_gerber",
-  "export_pdf",
-  "export_3d",
-  "sync_schematic_to_board",
-  "list_schematic_nets",
-  "list_schematic_labels",
-  "get_schematic_view",
-  "digikey_check_library_availability",
-] as const;
-
-/**
- * Extra wall-clock granted to `autoroute` on top of the routing budget the
- * caller asked for, covering DSN export, JVM start-up per attempt, SES import
- * and the board save.
- */
-export const AUTOROUTE_OVERHEAD_MS = 120_000;
-
-/**
- * How long the Node side waits for `command` before abandoning the request.
+ * Instead the bridge watches every command it dispatches:
+ *  - every `alertIntervalMs` it alerts the client (progress notification for the
+ *    tool call plus an MCP log message);
+ *  - after `interruptPromptMs` it asks the user (MCP elicitation) whether to keep
+ *    waiting or interrupt, and asks again after each further `interruptPromptMs`;
+ *  - the client may cancel the tool call at any time (notifications/cancelled,
+ *    e.g. Esc in Claude Code), which interrupts as well.
  *
- * `autoroute` is computed rather than fixed: its Python side takes a
- * per-attempt `timeout` (seconds, default 300) and repeats it `attempts` times
- * for best-of-N, so a flat ceiling would still cut off a caller who legitimately
- * raised either. Under-waiting here is what issue #251 reports — the Node
- * default fired at 30 s while Freerouting was still working, so the tool
- * reported failure even though a valid .ses had been written.
+ * Interrupting kills the worker's child processes (kicad-cli, Freerouting, the
+ * zone-fill subprocess, ...) so the Python handler returns and the board loaded
+ * in memory survives; if the worker still has not answered after
+ * `interruptGraceMs`, the worker itself is restarted.
+ *
+ * Every knob is an environment variable in seconds; 0 disables it.
  */
-export function computeCommandTimeout(command: string, params?: unknown): number {
-  if (command === "autoroute") {
-    const p = (params ?? {}) as Record<string, unknown>;
 
-    const perAttemptSec = toPositiveNumber(p.timeout) ?? 300;
-    const attempts = Math.max(1, Math.floor(toPositiveNumber(p.attempts) ?? 1));
+/** Periodic "still running" alert. */
+export const DEFAULT_ALERT_INTERVAL_MS = 30_000;
 
-    const budgetMs = perAttemptSec * 1000 * attempts + AUTOROUTE_OVERHEAD_MS;
-    // Never drop below the blanket long-running allowance.
-    return Math.max(budgetMs, LONG_COMMAND_TIMEOUT_MS);
-  }
+/** When the user is first offered to interrupt (and the re-ask interval). */
+export const DEFAULT_INTERRUPT_PROMPT_MS = 300_000;
 
-  if ((LONG_RUNNING_COMMANDS as readonly string[]).includes(command)) {
-    return LONG_COMMAND_TIMEOUT_MS;
-  }
+/** How long an interrupted worker gets to answer before it is restarted. */
+export const DEFAULT_INTERRUPT_GRACE_MS = 10_000;
 
-  return DEFAULT_COMMAND_TIMEOUT_MS;
+export interface WatchdogPolicy {
+  /** Optional hard ceiling; reaching it interrupts the command. 0 = none (default). */
+  hardTimeoutMs: number;
+  /** 0 = no periodic alerts. */
+  alertIntervalMs: number;
+  /** 0 = never ask (the client can still cancel). */
+  interruptPromptMs: number;
+  interruptGraceMs: number;
 }
 
-/** Finite, positive numbers only; anything else falls back to the default. */
-function toPositiveNumber(value: unknown): number | undefined {
-  const n = typeof value === "string" ? Number(value) : value;
-  if (typeof n !== "number" || !Number.isFinite(n) || n <= 0) return undefined;
-  return n;
+export function loadWatchdogPolicy(env: NodeJS.ProcessEnv = process.env): WatchdogPolicy {
+  return {
+    hardTimeoutMs: secondsFromEnv(env.KICAD_MCP_COMMAND_TIMEOUT_SEC, 0),
+    alertIntervalMs: secondsFromEnv(env.KICAD_MCP_ALERT_INTERVAL_SEC, DEFAULT_ALERT_INTERVAL_MS),
+    interruptPromptMs: secondsFromEnv(
+      env.KICAD_MCP_INTERRUPT_PROMPT_SEC,
+      DEFAULT_INTERRUPT_PROMPT_MS,
+    ),
+    interruptGraceMs: secondsFromEnv(env.KICAD_MCP_INTERRUPT_GRACE_SEC, DEFAULT_INTERRUPT_GRACE_MS),
+  };
+}
+
+/** Seconds (fractions allowed) → ms; unset, empty, negative or nonsense → fallback. */
+function secondsFromEnv(raw: string | undefined, fallbackMs: number): number {
+  if (raw === undefined || raw.trim() === "") return fallbackMs;
+  const seconds = Number(raw);
+  if (!Number.isFinite(seconds) || seconds < 0) return fallbackMs;
+  return Math.round(seconds * 1000);
+}
+
+/** Human-readable duration for alerts: "45s", "2min05s", "5min", "1h03min". */
+export function formatElapsed(ms: number): string {
+  const total = Math.max(0, Math.round(ms / 1000));
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  if (h > 0) return `${h}h${String(m).padStart(2, "0")}min`;
+  if (m > 0) return s > 0 ? `${m}min${String(s).padStart(2, "0")}s` : `${m}min`;
+  return `${s}s`;
 }

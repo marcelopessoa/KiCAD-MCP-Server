@@ -27,7 +27,7 @@ from commands.schematic import SchematicLoadError, SchematicManager
 from commands.wire_manager import WireManager
 from utils.board_items import clone_footprint
 from utils.interactive_schematic import reload_kicad_schematic
-from utils.kicad_cli import kicad_cli_not_found_message, resolve_kicad_cli
+from utils.kicad_cli import cli_timeout, kicad_cli_not_found_message, resolve_kicad_cli
 from utils.project_settings_guard import preserve_project_settings
 from utils.sexpr_format import dumps as kicad_dumps
 from utils.sexpr_format import escape_sexpr_string
@@ -1315,7 +1315,7 @@ class SchematicHandlersMixin:
             if params.get("blackAndWhite"):
                 cmd.insert(-1, "--black-and-white")
 
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=cli_timeout())
 
             if result.returncode == 0:
                 return {"success": True, "file": {"path": output_path}}
@@ -1568,7 +1568,7 @@ class SchematicHandlersMixin:
                     "--no-background-color",
                     schematic_path,
                 ]
-                result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=cli_timeout())
 
                 if result.returncode != 0:
                     return {
@@ -2450,7 +2450,7 @@ class SchematicHandlersMixin:
                 if params.get("blackAndWhite"):
                     cmd.append("--black-and-white")
 
-                result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=cli_timeout())
 
                 if result.returncode != 0:
                     return {
@@ -2815,7 +2815,7 @@ class SchematicHandlersMixin:
                 ]
                 logger.info(f"Running ERC command: {' '.join(cmd)}")
 
-                result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=cli_timeout())
 
                 # kicad-cli returns non-zero when ERC violations are found —
                 # this is normal, not an error.  Only fail when no JSON was
@@ -3282,7 +3282,7 @@ class SchematicHandlersMixin:
                 tmp_path,
                 schematic_path,
             ]
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=cli_timeout())
             if result.returncode != 0:
                 logger.warning(
                     f"kicad-cli netlist export failed (exit {result.returncode}): "
@@ -3573,7 +3573,7 @@ class SchematicHandlersMixin:
                     tmp_dir,
                     schematic_path,
                 ]
-                result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=cli_timeout())
 
                 if result.returncode != 0:
                     return {

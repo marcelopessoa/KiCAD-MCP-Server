@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import pcbnew
 from commands.routing import persist_net_assignment_to_project
-from utils.kicad_cli import kicad_cli_not_found_message, resolve_kicad_cli
+from utils.kicad_cli import cli_timeout, kicad_cli_not_found_message, resolve_kicad_cli
 from utils.kicad_dru import (
     build_layer_constraint_rule,
     persist_layer_constraint_rule,
@@ -540,13 +540,16 @@ class DesignRuleCommands:
                 }
 
             report_path = params.get("reportPath")
-            # Caller-overridable timeout (seconds). Defaults to 600s for big boards
-            # but smaller MCP transport budgets (e.g. 120s) can lower it explicitly.
-            try:
-                timeout_sec = int(params.get("timeoutSec", 600))
-            except (TypeError, ValueError):
-                timeout_sec = 600
-            timeout_sec = max(10, min(timeout_sec, 1800))  # clamp to [10, 1800]
+            # Caller-overridable timeout (seconds, clamped to [10, 1800]). Without
+            # it there is no limit (unless KICAD_MCP_CLI_TIMEOUT_SEC is set): the
+            # Node bridge alerts on long runs and lets the user interrupt.
+            timeout_sec: Optional[float] = cli_timeout()
+            if params.get("timeoutSec") is not None:
+                try:
+                    timeout_sec = max(10, min(int(params["timeoutSec"]), 1800))
+                except (TypeError, ValueError):
+                    pass
+            timeout_label = f"{timeout_sec:g}s" if timeout_sec else "no limit"
 
             # Get the board file path
             board_file = self.board.GetFileName()
@@ -584,7 +587,7 @@ class DesignRuleCommands:
                     board_file,
                 ]
 
-                logger.info(f"Running DRC command (timeout={timeout_sec}s): {' '.join(cmd)}")
+                logger.info(f"Running DRC command (timeout={timeout_label}): {' '.join(cmd)}")
 
                 # Run DRC. subprocess.run kills the child on TimeoutExpired.
                 result = subprocess.run(
@@ -698,12 +701,12 @@ class DesignRuleCommands:
                     os.unlink(json_output)
 
         except subprocess.TimeoutExpired:
-            logger.error(f"DRC command timed out after {timeout_sec}s")
+            logger.error(f"DRC command timed out after {timeout_label}")
             return {
                 "success": False,
                 "message": "DRC command timed out",
                 "errorDetails": (
-                    f"Command took longer than {timeout_sec} seconds; "
+                    f"Command took longer than {timeout_label}; "
                     "raise timeoutSec param for very large boards"
                 ),
             }

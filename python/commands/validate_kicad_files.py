@@ -38,7 +38,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from utils.kicad_cli import resolve_kicad_cli
+from utils.kicad_cli import cli_timeout, resolve_kicad_cli
 
 logger = logging.getLogger("kicad_interface")
 
@@ -77,7 +77,6 @@ _FALSE_STRINGS = frozenset({"", "0", "false", "no", "off", "none", "null"})
 # Cap on the size of the single file this will duplicate to run kicad-cli on.
 _MAX_CLI_COPY_BYTES = 64 * 1024 * 1024
 
-_CLI_TIMEOUT_SEC = 180
 
 
 class _Node:
@@ -382,10 +381,10 @@ def _cli_check(subcommand: str, work_dir: Path, target: Path) -> Dict[str, Any]:
             cwd=str(work_dir),
             capture_output=True,
             text=True,
-            timeout=_CLI_TIMEOUT_SEC,
+            timeout=cli_timeout(),
         )
     except subprocess.TimeoutExpired:
-        return {"ran": False, "reason": f"kicad-cli timed out after {_CLI_TIMEOUT_SEC}s"}
+        return {"ran": False, "reason": f"kicad-cli timed out after {cli_timeout()}s"}
     except OSError as exc:
         return {"ran": False, "reason": f"kicad-cli could not be executed: {exc}"}
 

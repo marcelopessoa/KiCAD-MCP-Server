@@ -10,7 +10,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 import pcbnew
-from utils.kicad_cli import kicad_cli_not_found_message, resolve_kicad_cli
+from utils.kicad_cli import cli_timeout, kicad_cli_not_found_message, resolve_kicad_cli
 
 logger = logging.getLogger("kicad_interface")
 
@@ -107,7 +107,9 @@ class ExportCommands:
                     ]
 
                     try:
-                        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+                        result = subprocess.run(
+                            cmd, capture_output=True, text=True, timeout=cli_timeout()
+                        )
                         if result.returncode == 0:
                             # Get list of generated drill files
                             for file in os.listdir(output_dir):
@@ -430,7 +432,7 @@ class ExportCommands:
                 cmd,
                 capture_output=True,
                 text=True,
-                timeout=300,  # 5 minute timeout for 3D export
+                timeout=cli_timeout(),
             )
 
             if result.returncode != 0:
