@@ -1160,6 +1160,27 @@ There is no fixed per-command timeout: on a slow machine `kicad-cli` alone can s
 
 Interrupting kills the worker's subprocesses (`kicad-cli`, Freerouting, the zone-fill process), so the Python handler returns and the project/board loaded in memory is kept. If the worker still has not answered after a grace period it is restarted, and the loaded project must be reopened.
 
+**Claude Code IDE extensions (VS Code / JetBrains) never show the question.** They run the CLI in print mode, where an MCP elicitation that no hook answers is declined automatically, and they do not display tool progress either. On Windows and WSL, [`scripts/claude-code/elicitation-dialog.py`](scripts/claude-code/elicitation-dialog.py) is a Claude Code `Elicitation` hook that shows single-choice questions such as this one as a top-most Windows dialog (via `powershell.exe`) and returns the button clicked; it closes the dialog by itself if the command finishes first. Register it in `~/.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "Elicitation": [
+      {
+        "matcher": "kicad",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/python3 -I /path/to/KiCAD-MCP-Server/scripts/claude-code/elicitation-dialog.py",
+            "timeout": 600
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
 The timings are environment variables (seconds; `0` disables): `KICAD_MCP_ALERT_INTERVAL_SEC` (30), `KICAD_MCP_INTERRUPT_PROMPT_SEC` (300), `KICAD_MCP_INTERRUPT_GRACE_SEC` (10), and an optional hard ceiling `KICAD_MCP_COMMAND_TIMEOUT_SEC` (0 = none). `KICAD_MCP_CLI_TIMEOUT_SEC` restores a limit on the `kicad-cli` subprocesses themselves (unset = none). The `command_watchdog_settings` tool reads or changes the first four for the running session without restarting the server.
 
 ### OpenCode (Windows)
